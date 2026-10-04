@@ -1,0 +1,26 @@
+# --- Private: never commit ---
+# WhatsApp login (anyone with this folder can use the WhatsApp account)
+whatsapp/session/
+whatsapp/.wwebjs_cache/
+# Print page PIN
+pin.txt
+# People's documents
+whatsapp/jobs/
+uploads/
+# Logs and state: names, phone ids, file names
+*.log
+whatsapp/sessions.json
+whatsapp/printed.json
+whatsapp/recent_prints.json
+whatsapp/status.json
+whatsapp/reprint.json
+whatsapp/qr.png
+whatsapp/qr.html
+whatsapp/qr_opened.txt
+
+# --- Downloaded programs and packages (re-download instead) ---
+whatsapp/node_modules/
+SumatraPDF.exe
+SumatraPDF-settings.txt
+cloudflared.exe
+__pycache__/
