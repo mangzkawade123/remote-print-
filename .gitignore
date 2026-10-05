@@ -24,3 +24,6 @@ SumatraPDF.exe
 SumatraPDF-settings.txt
 cloudflared.exe
 __pycache__/
+
+# Local helper
+push_to_github.bat

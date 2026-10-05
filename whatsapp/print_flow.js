@@ -8,7 +8,11 @@ const HEADER = '🖨️ *Print Bot*';
 // Set to null to ask for the paper size again.
 const FIXED_SIZE = 'A4';
 
+// All options (the order of "CHANGE OPTIONS"). Custom only ASKS the first ones; the rest use defaults
+// and can still be changed from the summary.
 const STEPS = ['copies', 'color', 'sides', 'pages', 'size', 'tray', 'orientation'].filter(x => !(FIXED_SIZE && x === 'size'));
+const ASKED_STEPS = ['copies', 'color', 'sides', 'pages', ...(FIXED_SIZE ? [] : ['size'])];
+const FLOW = ['copies', 'color', 'sides', 'pages', 'size', 'tray', 'orientation', 'confirm'];
 
 // Paper sources as named by the Brother printer driver (passed to SumatraPDF as bin=<name>)
 const TRAYS = { 1: 'Tray1', 2: 'MP Tray', 3: 'Auto Select' };
@@ -23,6 +27,46 @@ const DIRECT_OPTIONS = { copies: 1, color: 'color', sides: 'single', pages: 'all
 // "Letterhead" (first question): prints at once on pre-printed letterhead paper loaded in this tray
 const LETTERHEAD_TRAY = 'MP Tray';
 const LETTERHEAD_OPTIONS = { ...DIRECT_OPTIONS, sides: 'single', tray: LETTERHEAD_TRAY };
+// First-question shortcuts: 1-4 print at once, 5 asks the Custom questions
+const PRESETS = {
+  1: { name: 'Direct Print', options: DIRECT_OPTIONS, words: ['direct', 'direct print', 'print', 'yes', 'color', 'colour'] },
+  2: { name: 'Black & White', options: { ...DIRECT_OPTIONS, color: 'mono' }, words: ['bw', 'b&w', 'b/w', 'black', 'black & white', 'mono'] },
+  3: { name: 'Both Side (B&W)', options: { ...DIRECT_OPTIONS, color: 'mono', sides: 'duplex' }, words: ['both', 'both side', 'duplex', 'double'] },
+  4: { name: 'Letterhead', options: LETTERHEAD_OPTIONS, letterhead: true, words: ['letterhead', 'letter head', 'lh'] },
+};
+const CUSTOM_WORDS = ['5', 'custom', 'options', 'choose', 'choose options'];
+
+// One-line quick code, e.g. "2 bw both 1-3" = 2 copies, black & white, both sides, pages 1-3.
+// Anything not written uses the Direct Print defaults. Returns { ok, options } or { ok: false, error }.
+function parseQuick(text, totalPages) {
+  const o = { ...DIRECT_OPTIONS };
+  let copiesSet = false;
+  let letterhead = false;
+  const words = String(text).toLowerCase().replace(/[–—]/g, '-').replace(/\s*,\s*/g, ',').replace(/\s*-\s*/g, '-')
+    .split(/\s+/).filter(Boolean);
+  for (const w of words) {
+    let m;
+    if ((m = w.match(/^(\d+)(x|copy|copies)$/)) || (!copiesSet && /^\d+$/.test(w) && (m = [w, w]))) {
+      const n = Number(m[1]);
+      if (n < 1 || n > 50) return { ok: false, error: 'Copies must be from 1 to 50.' };
+      o.copies = n; copiesSet = true;
+    } else if (/^\d+(-\d+)?(,\d+(-\d+)?)*$/.test(w)) {
+      const r = parsePages(w, totalPages);
+      if (!r.ok) return r;
+      o.pages = r.text;
+    } else if (['bw', 'b&w', 'b/w', 'black', 'mono', 'grey', 'gray'].includes(w)) o.color = 'mono';
+    else if (['color', 'colour'].includes(w)) o.color = 'color';
+    else if (['both', 'duplex', 'double'].includes(w)) o.sides = 'duplex';
+    else if (['single', 'one'].includes(w)) o.sides = 'single';
+    else if (['lh', 'letterhead'].includes(w)) { o.tray = LETTERHEAD_TRAY; o.sides = 'single'; letterhead = true; }
+    else if (['mp', 'manual'].includes(w)) o.tray = 'MP Tray';
+    else if (['tray1', 'tray'].includes(w)) o.tray = 'Tray1';
+    else if (['landscape', 'portrait'].includes(w)) o.orientation = w;
+    else if (['copies', 'copy', 'page', 'pages', 'side', 'sides', 'print'].includes(w)) continue;
+    else return { ok: false, error: `I didn't understand "${w}". Example: *2 bw both 1-3* (2 copies, black & white, both sides, pages 1-3).` };
+  }
+  return { ok: true, options: o, letterhead };
+}
 
 const LABELS = {
   color: { mono: '🖤 Black & White', color: '🎨 Color' },
@@ -34,7 +78,8 @@ function question(step, s) {
   const file = `📄 ${s.filename} (${s.pages ? `${s.pages} page${s.pages === 1 ? '' : 's'}` : 'pages unknown'})`;
   switch (step) {
     case 'start':
-      return `${file}\n\nHow do you want to print?\n1️⃣ ⚡ Direct Print (1 copy · Color · Single Side · All pages · A4 · Tray1)\n2️⃣ ⚙️ Choose options\n3️⃣ 📜 Letterhead (letterhead paper in the ${LETTERHEAD_TRAY} · Single Side)\n❌ Type *cancel* to skip`;
+      return `${file}\n\nHow do you want to print?\n1️⃣ ⚡ Direct Print (Color)\n2️⃣ 🖤 Black & White\n3️⃣ 🔄 Both Side (B&W)\n` +
+        `4️⃣ 📜 Letterhead (${LETTERHEAD_TRAY})\n5️⃣ ⚙️ Custom\n✏️ Or in one line, e.g. *2 bw both 1-3*\n❌ *cancel* to skip`;
     case 'tray':
       return '🗂️ Select paper tray:\n' + Object.entries(TRAYS).map(([k, v]) => `${k}️⃣ ${TRAY_LABELS[v]}`).join('\n');
     case 'copies':
@@ -72,7 +117,8 @@ function pollFor(step, s) {
   switch (step) {
     case 'start':
       return { name: `🖨️ ${short} (${pages})\nHow do you want to print?`,
-        options: opt(['⚡ Direct Print (1 copy, Color, A4)', '1'], ['⚙️ Choose options', '2'], ['📜 Letterhead (MP Tray)', '3'], ['❌ Cancel', 'cancel']) };
+        options: opt(['⚡ Direct Print (Color)', '1'], ['🖤 Black & White', '2'], ['🔄 Both Side (B&W)', '3'],
+          ['📜 Letterhead (MP Tray)', '4'], ['⚙️ Custom', '5'], ['❌ Cancel', 'cancel']) };
     case 'copies':
       return { name: '🖨️ How many copies?', options: opt(['1', '1'], ['2', '2'], ['3', '3'], ['✏️ Other number (type it)', 'custom']) };
     case 'color':
@@ -134,20 +180,37 @@ function applyAnswer(s, text) {
   const t = String(text || '').trim();
   const lower = t.toLowerCase();
   if (['cancel', 'stop', '❌'].includes(lower) && s.step !== 'confirm') return { ok: true, action: 'cancel' };
-  // With a fixed paper size the size question is skipped
+  // Questions Custom doesn't ask (fixed paper size, tray, orientation) get their default and are skipped
+  const defaults = { size: FIXED_SIZE || 'A4', tray: DIRECT_OPTIONS.tray, orientation: DIRECT_OPTIONS.orientation };
   const after = nextStep => {
-    if (FIXED_SIZE && nextStep === 'size') { s.options.size = FIXED_SIZE; nextStep = 'tray'; }
-    return s.changing ? 'confirm' : nextStep;
+    if (s.changing) return 'confirm';
+    while (nextStep !== 'confirm' && !ASKED_STEPS.includes(nextStep)) {
+      if (s.options[nextStep] === undefined) s.options[nextStep] = defaults[nextStep];
+      nextStep = FLOW[FLOW.indexOf(nextStep) + 1];
+    }
+    return nextStep;
   };
 
   switch (s.step) {
     case 'start': {
-      const v = pick(t, { direct: ['1', 'direct', 'direct print', 'print', 'yes'], options: ['2', 'options', 'choose', 'choose options'],
-        letterhead: ['3', 'letterhead', 'letter head', 'lh'] });
-      if (v === 'direct') { s.options = { ...DIRECT_OPTIONS }; return { ok: true, action: 'print' }; }
-      if (v === 'letterhead') { s.options = { ...LETTERHEAD_OPTIONS }; s.letterhead = true; return { ok: true, action: 'print' }; }
-      if (v === 'options') return { ok: true, next: 'copies' };
-      return { ok: false, error: 'Please reply 1 for Direct Print, 2 to choose options or 3 for Letterhead.' };
+      const key = Object.keys(PRESETS).find(k => k === lower || PRESETS[k].words.includes(lower));
+      if (key) {
+        const p = PRESETS[key];
+        s.options = { ...p.options };
+        s.presetName = p.name;
+        s.letterhead = !!p.letterhead;
+        return { ok: true, action: 'print' };
+      }
+      if (CUSTOM_WORDS.includes(lower)) return { ok: true, next: 'copies' };
+      // One-line quick code -> summary
+      if (/\s/.test(t) || /^\d+(x|copy|copies)$/i.test(t) || /[-,]/.test(t)) {
+        const q = parseQuick(t, s.pages);
+        if (!q.ok) return q;
+        s.options = q.options;
+        s.letterhead = q.letterhead;
+        return { ok: true, next: 'confirm' };
+      }
+      return { ok: false, error: 'Please reply 1-5, or type it in one line like *2 bw both 1-3*.' };
     }
     case 'copies': {
       const n = Number(lower.replace(/copies?|x/g, '').trim());
@@ -223,6 +286,28 @@ function applyAnswer(s, text) {
   }
 }
 
+// How much will be printed: pages per copy, total pages and sheets of paper (both sides = half the sheets).
+// Returns null when the PDF's page count is unknown.
+function printCount(s) {
+  const o = s.options || {};
+  let perCopy = s.pages || 0;
+  if (o.pages && o.pages !== 'all') {
+    const r = parsePages(o.pages, s.pages);
+    perCopy = r.ok ? r.count : 0;
+  }
+  if (!perCopy) return null;
+  const copies = o.copies || 1;
+  const sheetsPerCopy = o.sides === 'duplex' ? Math.ceil(perCopy / 2) : perCopy;
+  return { perCopy, totalPages: perCopy * copies, sheets: sheetsPerCopy * copies };
+}
+
+function countLine(s) {
+  const c = printCount(s);
+  if (!c) return '🧾 Pages to print: unknown';
+  const sheets = c.sheets === c.totalPages ? '' : ` on ${c.sheets} sheet${c.sheets === 1 ? '' : 's'}`;
+  return `🧾 Pages to print: *${c.totalPages}*${sheets}`;
+}
+
 function pagesLabel(s) {
   if (s.options.pages === 'all' || !s.options.pages) return `All${s.pages ? ` (1-${s.pages})` : ''}`;
   return s.options.pages;
@@ -244,6 +329,7 @@ function summary(s, withChoices = true) {
     `📐 Paper Size: ${o.size}`,
     `🗂️ Tray: ${TRAY_LABELS[o.tray || 'Auto Select']}`,
     `↕️ Orientation: ${orient}`,
+    countLine(s),
     line,
   ];
   for (const w of warnings(s)) lines.push(`⚠️ ${w}`);
@@ -344,4 +430,4 @@ function pdfInfo(buf) {
   return { pages, orientations: detected && detected <= pages ? orientations : null };
 }
 
-module.exports = { HEADER, STEPS, DIRECT_OPTIONS, LETTERHEAD_OPTIONS, question, pollFor, applyAnswer, parsePages, summary, sumatraSettings, pdfInfo, LABELS };
+module.exports = { HEADER, STEPS, DIRECT_OPTIONS, LETTERHEAD_OPTIONS, PRESETS, parseQuick, printCount, countLine, question, pollFor, applyAnswer, parsePages, summary, sumatraSettings, pdfInfo, LABELS };

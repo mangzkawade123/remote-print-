@@ -82,41 +82,77 @@ test('backwards range rejected', () => assert.match(flow.parsePages('5-2', 12).e
 test('text rejected', () => assert.strictEqual(flow.parsePages('abc', 12).ok, false));
 
 console.log('\nConversation');
-test('start: 1 = Direct Print with default options', () => {
-  const s = { ...newSession(3), step: 'start' };
-  assert.ok(flow.question('start', s).includes('Direct Print'));
-  const r = flow.applyAnswer(s, '1');
-  assert.strictEqual(r.action, 'print');
-  assert.deepStrictEqual(s.options, flow.DIRECT_OPTIONS);
-  assert.strictEqual(flow.sumatraSettings(s.options), 'color,simplex,paper=A4,bin=Tray1');
+const full = { copies: 1, color: 'color', sides: 'single', pages: 'all', size: 'A4', tray: 'Tray1', orientation: 'auto' };
+test('start: presets 1-4 print at once with the right settings', () => {
+  const expect = {
+    1: [full, 'color,simplex,paper=A4,bin=Tray1'],
+    2: [{ ...full, color: 'mono' }, 'monochrome,simplex,paper=A4,bin=Tray1'],
+    3: [{ ...full, color: 'mono', sides: 'duplex' }, 'monochrome,duplexlong,paper=A4,bin=Tray1'],
+    4: [{ ...full, tray: 'MP Tray' }, 'color,simplex,paper=A4,bin=MP Tray'],
+  };
+  for (const [ans, [opts, settings]] of Object.entries(expect)) {
+    const s = { ...newSession(3), step: 'start' };
+    assert.strictEqual(flow.applyAnswer(s, ans).action, 'print', ans);
+    assert.deepStrictEqual(s.options, opts, ans);
+    assert.strictEqual(flow.sumatraSettings(s.options), settings, ans);
+  }
+  const lh = { ...newSession(3), step: 'start' };
+  flow.applyAnswer(lh, '4');
+  assert.strictEqual(lh.letterhead, true);
+  const q = flow.question('start', newSession(3));
+  for (const part of ['Direct Print', 'Black & White', 'Both Side', 'Letterhead', 'Custom', '2 bw both 1-3']) assert.ok(q.includes(part), part);
 });
-test('start: 2 = choose options -> copies question', () => {
-  const s = { ...newSession(3), step: 'start' };
-  assert.strictEqual(flow.applyAnswer(s, '2').next, 'copies');
+test('start: words work too (bw, both, letterhead, print, custom)', () => {
+  for (const [w, name] of [['bw', 'Black & White'], ['both', 'Both Side (B&W)'], ['letterhead', 'Letterhead'], ['print', 'Direct Print']]) {
+    const s = { ...newSession(3), step: 'start' };
+    assert.strictEqual(flow.applyAnswer(s, w).action, 'print', w);
+    assert.strictEqual(s.presetName, name);
+  }
+  assert.strictEqual(flow.applyAnswer({ ...newSession(3), step: 'start' }, 'custom').next, 'copies');
 });
-test('start: 3 = Letterhead from the MP Tray, single side, print at once', () => {
-  const s = { ...newSession(2), step: 'start' };
-  assert.ok(flow.question('start', s).includes('Letterhead'));
-  const r = flow.applyAnswer(s, '3');
-  assert.strictEqual(r.action, 'print');
-  assert.deepStrictEqual(s.options, flow.LETTERHEAD_OPTIONS);
-  assert.strictEqual(flow.sumatraSettings(s.options), 'color,simplex,paper=A4,bin=MP Tray');
-  assert.strictEqual(flow.applyAnswer({ ...newSession(2), step: 'start' }, 'letterhead').action, 'print');
+test('start: 5 = Custom -> copies question', () => {
+  const s = { ...newSession(3), step: 'start' };
+  assert.strictEqual(flow.applyAnswer(s, '5').next, 'copies');
 });
 test('start: invalid answer and cancel', () => {
-  const s = { ...newSession(3), step: 'start' };
-  assert.strictEqual(flow.applyAnswer(s, '9').ok, false);
-  assert.strictEqual(flow.applyAnswer(s, 'cancel').action, 'cancel');
+  for (const bad of ['9', 'hello']) assert.strictEqual(flow.applyAnswer({ ...newSession(3), step: 'start' }, bad).ok, false, bad);
+  assert.strictEqual(flow.applyAnswer({ ...newSession(3), step: 'start' }, 'cancel').action, 'cancel');
 });
-test('full flow -> summary -> print (Tests 1/2)', () => {
+
+console.log('\nQuick code (one line)');
+test('"2 bw both 1-3" -> summary with those options -> PRINT', () => {
+  const s = { ...newSession(5), step: 'start' };
+  const r = flow.applyAnswer(s, '2 bw both 1-3');
+  assert.strictEqual(r.next, 'confirm');
+  assert.deepStrictEqual(s.options, { ...full, copies: 2, color: 'mono', sides: 'duplex', pages: '1-3' });
+  assert.strictEqual(flow.applyAnswer({ ...s, step: 'confirm' }, '1').action, 'print');
+});
+test('quick code variants', () => {
+  const q = t => flow.parseQuick(t, 10);
+  assert.deepStrictEqual(q('3x').options, { ...full, copies: 3 });
+  assert.deepStrictEqual(q('1-3').options, { ...full, pages: '1-3' });
+  assert.deepStrictEqual(q('5 copies 1, 3, 5-7 landscape').options, { ...full, copies: 5, pages: '1,3,5-7', orientation: 'landscape' });
+  assert.deepStrictEqual(q('2 4').options, { ...full, copies: 2, pages: '4' }); // 2nd number = page
+  const lh = q('lh 2');
+  assert.deepStrictEqual(lh.options, { ...full, copies: 2, tray: 'MP Tray' });
+  assert.strictEqual(lh.letterhead, true);
+});
+test('quick code errors are explained', () => {
+  assert.match(flow.parseQuick('2 bw both 1-30', 10).error, /only 10 pages/);
+  assert.match(flow.parseQuick('2 blue', 10).error, /understand "blue"/);
+  assert.match(flow.parseQuick('99', 10).error, /1 to 50/);
+});
+
+console.log('\nCustom (4 questions)');
+test('custom: copies, color, sides, pages -> summary (tray / orientation default)', () => {
   const s = newSession(12);
-  // copies 2, B&W, both side, page range -> 1-10, (A4 fixed, not asked), portrait
-  const r = answerAll(s, ['2', '1', '2', '3', '1-10', '1', '1']); // ... tray 1 = Tray1, portrait
+  // 2 copies, B&W, both side, page range -> 1-10
+  const r = answerAll(s, ['2', '1', '2', '3', '1-10']);
   assert.ok(r.every(x => x.ok), JSON.stringify(r));
   assert.strictEqual(s.step, 'confirm');
-  assert.deepStrictEqual(s.options, { copies: 2, color: 'mono', sides: 'duplex', pages: '1-10', size: 'A4', tray: 'Tray1', orientation: 'portrait' });
+  assert.deepStrictEqual(s.options, { ...full, copies: 2, color: 'mono', sides: 'duplex', pages: '1-10' });
   const text = flow.summary(s);
-  for (const part of ['PRINT CONFIRMATION', 'File: test.pdf', 'Total Pages: 12', 'Copies: 2', 'Black & White', 'Both Side', 'Pages: 1-10', 'Paper Size: A4', 'Portrait'])
+  for (const part of ['PRINT CONFIRMATION', 'File: test.pdf', 'Total Pages: 12', 'Copies: 2', 'Black & White', 'Both Side', 'Pages: 1-10', 'Paper Size: A4', 'Tray1', 'Auto'])
     assert.ok(text.includes(part), `summary missing "${part}"`);
   assert.strictEqual(flow.applyAnswer(s, '1').action, 'print');
 });
@@ -130,43 +166,62 @@ test('invalid copies handled', () => {
   for (const bad of ['0', '-2', '2.5', 'many', '500']) assert.strictEqual(flow.applyAnswer(s, bad).ok, false, bad);
   assert.strictEqual(s.step, 'copies');
 });
-test('pages typed directly at the pages question', () => {
+test('pages typed directly at the pages question -> summary', () => {
   const s = newSession(10);
   answerAll(s, ['1', '1', '1', '1,3,5-7']);
   assert.strictEqual(s.options.pages, '1,3,5-7');
-  assert.strictEqual(s.step, 'tray'); // size question skipped
+  assert.strictEqual(s.step, 'confirm');
 });
 test('paper size fixed to A4: never asked, always A4', () => {
   const s = newSession(1);
   answerAll(s, ['1', '1', '1', '1']);
-  assert.strictEqual(s.step, 'tray');
   assert.strictEqual(s.options.size, 'A4');
   assert.ok(!flow.question('changeWhich', s).includes('Page size'));
-  assert.ok(flow.summary({ ...s, options: { ...s.options, orientation: 'auto' } }).includes('Paper Size: A4'));
 });
-test('CHANGE OPTIONS -> change one option -> back to summary', () => {
+test('tray and orientation can still be changed from the summary', () => {
   const s = newSession(4);
-  answerAll(s, ['1', '1', '1', '1', '3', '3']);
+  answerAll(s, ['1', '1', '1', '1']);            // -> summary
+  const menu = flow.question('changeWhich', s);
+  assert.ok(menu.includes('Paper tray') && menu.includes('Orientation'));
+  answerAll(s, ['3', '5', '2']);                 // change -> 5 = tray -> 2 = MP Tray
+  assert.strictEqual(s.options.tray, 'MP Tray');
+  assert.strictEqual(s.step, 'confirm');
+  answerAll(s, ['3', '6', '2']);                 // change -> 6 = orientation -> 2 = landscape
+  assert.strictEqual(s.options.orientation, 'landscape');
+  assert.strictEqual(s.step, 'confirm');
+});
+test('CHANGE OPTIONS -> change copies -> back to summary', () => {
+  const s = newSession(4);
+  answerAll(s, ['1', '1', '1', '1']);
   answerAll(s, ['3', '1', '4']);
   assert.strictEqual(s.options.copies, 4);
   assert.strictEqual(s.step, 'confirm');
 });
 test('CANCEL at confirmation (Test 9)', () => {
   const s = newSession(4);
-  answerAll(s, ['1', '1', '1', '1', '3', '3']);
+  answerAll(s, ['1', '1', '1', '1']);
   assert.strictEqual(flow.applyAnswer(s, '2').action, 'cancel');
 });
 test('"cancel" works during questions too', () => {
   const s = newSession(4);
   assert.strictEqual(flow.applyAnswer(s, 'cancel').action, 'cancel');
 });
-test('words accepted (bw, duplex, landscape, print)', () => {
+test('words accepted in custom (bw, duplex, all, print)', () => {
   const s = newSession(2);
-  const r = answerAll(s, ['1', 'bw', 'duplex', 'all', 'tray1', 'landscape', 'print']);
+  const r = answerAll(s, ['1', 'bw', 'duplex', 'all', 'print']);
   assert.strictEqual(s.options.color, 'mono');
   assert.strictEqual(s.options.sides, 'duplex');
-  assert.strictEqual(s.options.orientation, 'landscape');
-  assert.strictEqual(r[6].action, 'print');
+  assert.strictEqual(r[4].action, 'print');
+});
+
+console.log('\nPage count alert');
+test('pages to print: copies x pages, both sides = half the sheets', () => {
+  const s = { ...newSession(10), options: { ...full, copies: 3, sides: 'duplex', pages: '1-5' } };
+  assert.deepStrictEqual(flow.printCount(s), { perCopy: 5, totalPages: 15, sheets: 9 });
+  assert.deepStrictEqual(flow.printCount({ ...newSession(7), options: { ...full } }), { perCopy: 7, totalPages: 7, sheets: 7 });
+  assert.strictEqual(flow.printCount({ ...newSession(0), options: { ...full } }), null);
+  assert.ok(flow.summary(s).includes('Pages to print: *15* on 9 sheets'));
+  assert.ok(flow.summary({ ...newSession(2), options: { ...full } }).includes('Pages to print: *2*'));
 });
 
 console.log('\nPolls (tap-to-choose)');
@@ -197,7 +252,7 @@ test('tray question: 1 Tray1, 2 MP Tray, 3 Auto Select', () => {
   for (const [ans, tray] of [['1', 'Tray1'], ['2', 'MP Tray'], ['3', 'Auto Select'], ['manual', 'MP Tray'], ['auto', 'Auto Select']]) {
     const s = { ...newSession(2), step: 'tray' };
     const r = flow.applyAnswer(s, ans);
-    assert.ok(r.ok && r.next === 'orientation', ans);
+    assert.ok(r.ok && r.next === 'confirm', ans); // orientation is not asked: default, then summary
     assert.strictEqual(s.options.tray, tray);
   }
   assert.strictEqual(flow.applyAnswer({ ...newSession(2), step: 'tray' }, '7').ok, false);

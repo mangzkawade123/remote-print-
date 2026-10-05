@@ -21,6 +21,24 @@ const PRINT_IMAGES = false;
 const ASK_BEFORE_PRINT = true;
 // A print request with no answer for this long is cancelled (reply "reprint" to start it again)
 const ANSWER_TIMEOUT_MINUTES = 30;
+// A one-tap print (presets 1-4) bigger than this many pages is not started straight away: the bot shows
+// the summary with a page alert and waits for PRINT, so a wrong tap can't waste a lot of paper
+const LARGE_PRINT_PAGES = 30;
+
+// Where people collect their prints, and the sign-off of the "ready" message
+const PRINTER_LOCATION = 'Innovation Zone 1\nTable No 1';
+const SIGN_OFF = 'Regards,\nOperation Dept';
+
+// "✅ Your print is ready" message, with the sender's name and how much was printed
+function readyMessage(s, note = '') {
+  const name = String(s.who || '').replace(/\s*\(.*$/, '').trim();
+  const c = flow.printCount(s);
+  const o = s.options;
+  return `✅ *Your print is ready${name ? `, ${name}` : ''}!*${note}\n📄 ${s.filename}\n` +
+    `🧾 ${c ? `${c.totalPages} page${c.totalPages === 1 ? '' : 's'}${c.sheets !== c.totalPages ? ` on ${c.sheets} sheets` : ''}` : 'pages: ?'}` +
+    ` · ${o.copies} cop${o.copies === 1 ? 'y' : 'ies'} · ${flow.LABELS.color[o.color]} · ${flow.LABELS.sides[o.sides]}` +
+    `${o.tray && o.tray !== 'Tray1' ? ` · ${o.tray}` : ''}\n\n📍 Please collect it from the printer:\n${PRINTER_LOCATION}\n\n${SIGN_OFF}`;
+}
 // Ask the questions as tap-to-choose polls (typed answers like 1 / 2 / 3 keep working too)
 const USE_POLLS = false;
 // Print Word files too: they are converted to PDF with the Microsoft Word installed on this PC
@@ -28,7 +46,7 @@ const PRINT_WORD = true;
 const WORD_EXT = /\.(docx?|rtf)$/i;// WhatsApp groups where every member's PDFs are printed (group name, not case-sensitive).
 // Other groups are ignored.
 // One group per team keeps each team's files among its own members. Add more names here, then restart.
-const PRINT_GROUPS = ['Printing', 'HR Dept', 'Training Dept'];
+const PRINT_GROUPS = ['Printing', 'HR Dept', 'Training Dept', 'DM Print'];
 const MAX_MB = 25;
 // When the program connects, PDFs sent to the print groups in this many minutes before are printed if missed
 const CATCH_UP_MINUTES = 60;
@@ -445,7 +463,7 @@ async function followJob(s, firstOutcome) {
     const st = await jobState(s.file);
     if (!st.job && !st.unknown) {
       log(`Print completed later: "${s.filename}"`);
-      return sendBot(s.chatId, `✅ Printed: ${s.filename}${reportedError ? ' (after the printer problem was fixed)' : ''}`);
+      return sendBot(s.chatId, readyMessage(s, reportedError ? ' (after the printer problem was fixed)' : ''));
     }
     if (isJobError(st) && !reportedError) {
       reportedError = true;
@@ -563,14 +581,14 @@ async function doPrint(s) {
     const { outcome, st } = await watchJob(s.file, 60);
     if (outcome === 'done') {
       log(`Print completed: "${s.filename}" from ${s.who}`);
-      await sendBot(s.chatId, `✅ Printed: ${s.filename}\n${details}`);
+      await sendBot(s.chatId, readyMessage(s));
     } else if (outcome === 'error') {
       log(`Printer problem: "${s.filename}" - ${st.printer} / ${st.job}`);
       await sendBot(s.chatId, `⚠️ Not printed yet: ${s.filename}\nProblem: ${problemText(st)}.\n` +
         `The file is waiting in the print queue and will print when the printer is fixed. I'll post here when it's done.`);
     } else {
       log(`Still printing after 1 minute: "${s.filename}"`);
-      await sendBot(s.chatId, `🖨️ Printing: ${s.filename}\n${details}\nI'll post here when it's finished.`);
+      await sendBot(s.chatId, `🖨️ Printing: ${s.filename}\n${details}\n${flow.countLine(s)}\nI'll post here when it's ready.`);
     }
     await finish(s, 'printed');
     // Keep following a job that hasn't finished (not awaited, so other requests continue meanwhile)
@@ -650,12 +668,19 @@ async function processAnswer(s, chatId, body) {
     return finish(s, 'cancelled');
   }
   if (r.action === 'print') {
-    if (s.step === 'start') log(`${s.letterhead ? 'Letterhead print' : 'Direct Print'} chosen for "${s.filename}"`);
+    if (s.step === 'start') log(`${s.presetName || (s.letterhead ? 'Letterhead' : 'Direct Print')} chosen for "${s.filename}"`);
     logOptions(s);
+    // Page alert: a big one-tap print waits for confirmation instead of printing straight away
+    const count = flow.printCount(s);
+    if (s.step === 'start' && count && count.totalPages > LARGE_PRINT_PAGES) {
+      log(`Large print (${count.totalPages} pages) - asking for confirmation: "${s.filename}"`);
+      s.step = 'confirm';
+      return ask(s, `⚠️ *Big print: ${count.totalPages} pages${count.sheets !== count.totalPages ? ` (${count.sheets} sheets)` : ''}.* Please confirm.`);
+    }
     saveStore();
     if (s.letterhead) {
       await sendBot(chatId, `📜 Letterhead print: put the letterhead paper in the ${s.options.tray} (manual feed slot), ` +
-        `${s.pages > 1 ? `${s.pages} sheets, ` : ''}letterhead facing the way your printer needs. Printing now...`);
+        `${count && count.sheets > 1 ? `${count.sheets} sheets, ` : ''}letterhead facing the way your printer needs. Printing now...`);
     }
     return doPrint(s);
   }
