@@ -2,7 +2,9 @@
 // Pure functions only (no WhatsApp / printer access), so it can be tested on its own: node test_print_flow.js
 const zlib = require('zlib');
 
-const HEADER = '🖨️ *Print Bot*';
+const HEADER = '🖨️ *Sumago Print Buddy*';
+// Earlier names: the bot's own older messages start with these and must also be ignored as answers
+const OLD_HEADERS = ['🖨️ *Print Bot*'];
 
 // Paper size is fixed: every print uses this size and the size question is not asked.
 // Set to null to ask for the paper size again.
@@ -430,4 +432,4 @@ function pdfInfo(buf) {
   return { pages, orientations: detected && detected <= pages ? orientations : null };
 }
 
-module.exports = { HEADER, STEPS, DIRECT_OPTIONS, LETTERHEAD_OPTIONS, PRESETS, parseQuick, printCount, countLine, question, pollFor, applyAnswer, parsePages, summary, sumatraSettings, pdfInfo, LABELS };
+module.exports = { HEADER, OLD_HEADERS, STEPS, DIRECT_OPTIONS, LETTERHEAD_OPTIONS, PRESETS, parseQuick, printCount, countLine, question, pollFor, applyAnswer, parsePages, summary, sumatraSettings, pdfInfo, LABELS };

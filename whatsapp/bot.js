@@ -46,7 +46,7 @@ const PRINT_WORD = true;
 const WORD_EXT = /\.(docx?|rtf)$/i;// WhatsApp groups where every member's PDFs are printed (group name, not case-sensitive).
 // Other groups are ignored.
 // One group per team keeps each team's files among its own members. Add more names here, then restart.
-const PRINT_GROUPS = ['Printing', 'HR Dept', 'Training Dept', 'DM Print'];
+const PRINT_GROUPS = ['Printing', 'HR Dept', 'Training Dept', 'DM Print', 'Management Print'];
 const MAX_MB = 25;
 // When the program connects, PDFs sent to the print groups in this many minutes before are printed if missed
 const CATCH_UP_MINUTES = 60;
@@ -344,17 +344,19 @@ try { printedIds = new Set(JSON.parse(fs.readFileSync(PRINTED_FILE, 'utf8'))); }
 const RECENT_FILE = path.join(__dirname, 'recent_prints.json');
 let recentPrints = {};
 try { recentPrints = JSON.parse(fs.readFileSync(RECENT_FILE, 'utf8')); } catch (e) { /* first run */ }
-const fileKey = (chatId, filename) => `${chatId}|${filename}`;
-function printedRecently(chatId, chatName, filename) {
-  const t = recentPrints[fileKey(chatId, filename)] || (chatName && recentPrints[fileKey(chatName, filename)]);
+// A file is identified by group + file name + send time: the same name sent again later (e.g. every
+// scanner file is SCAN_001.pdf) is a new request, the same message seen twice is not
+const fileKey = (chatId, filename, t) => `${chatId}|${filename}|${t}`;
+function printedRecently(chatId, chatName, filename, sentAt) {
+  const t = recentPrints[fileKey(chatId, filename, sentAt)] || (chatName && recentPrints[fileKey(chatName, filename, sentAt)]);
   return t && Date.now() - t < CATCH_UP_MINUTES * 60000;
 }
-function markPrinted(id, chatId, filename, chatName) {
+function markPrinted(id, chatId, filename, chatName, sentAt) {
   printedIds.add(id);
   fs.writeFileSync(PRINTED_FILE, JSON.stringify([...printedIds].slice(-2000)));
-  if (chatId && filename) {
-    recentPrints[fileKey(chatId, filename)] = Date.now();
-    if (chatName) recentPrints[fileKey(chatName, filename)] = Date.now();
+  if (chatId && filename && sentAt) {
+    recentPrints[fileKey(chatId, filename, sentAt)] = Date.now();
+    if (chatName) recentPrints[fileKey(chatName, filename, sentAt)] = Date.now();
     for (const k of Object.keys(recentPrints)) if (Date.now() - recentPrints[k] > 24 * 3600000) delete recentPrints[k];
     fs.writeFileSync(RECENT_FILE, JSON.stringify(recentPrints));
   }
@@ -574,7 +576,7 @@ async function doPrint(s) {
   log(`Print started: "${s.filename}" (SumatraPDF settings: ${settings})`);
   try {
     await printPdf(s.file, settings);
-    if (s.msgId) markPrinted(s.msgId, s.chatId, s.filename, s.groupName);
+    if (s.msgId) markPrinted(s.msgId, s.chatId, s.filename, s.groupName, Number(String(s.detectKey || '').split('|').pop()) || undefined);
     const details = `🖨️ ${s.options.copies} cop${s.options.copies === 1 ? 'y' : 'ies'} · ` +
       `${flow.LABELS.color[s.options.color]} · ${flow.LABELS.sides[s.options.sides]} · pages ${s.options.pages === 'all' ? 'all' : s.options.pages} · ${s.options.size} · ${s.options.tray || 'Auto Select'}`;
     // Watch the Windows print queue for up to a minute to see what the printer did with it
@@ -606,7 +608,7 @@ async function doPrint(s) {
 // live or through the backup check.
 async function handleAnswer({ chatId, t, authorUser, fromMe, body }) {
   body = String(body || '').trim();
-  if (!body || (fromMe && body.startsWith(flow.HEADER))) return; // the bot's own messages
+  if (!body || (fromMe && [flow.HEADER, ...flow.OLD_HEADERS].some(h => body.startsWith(h)))) return; // the bot's own messages
   const key = `${chatId}|${t}|${fromMe ? 'me' : authorUser}|${body}`;
   if (answerKeys.has(key)) return;
   answerKeys.add(key);
@@ -889,15 +891,15 @@ async function catchUpOnce(quiet) {
       .sort((a, b) => a.t - b.t);
     if (!missed.length && (quiet || !g.isGroup)) continue;
     log(`Catch-up: ${missed.length} unprinted PDF(s) in ${g.isGroup ? 'group' : 'chat'} "${g.name}" from the last ${CATCH_UP_MINUTES} minutes`);
-    // If the same file was sent several times (e.g. resent because it did not print), print it once
+    // The same message can be listed twice (different id formats): skip it by group + name + send time
     const seen = new Set();
     for (const m of missed) {
-      if (m.data.filename && (seen.has(m.data.filename) || printedRecently(g.id, g.name, m.data.filename))) {
+      if (m.data.filename && (seen.has(`${m.data.filename}|${m.t}`) || printedRecently(g.id, g.name, m.data.filename, m.t))) {
         markPrinted(m.id);
         log(`Catch-up: skipped duplicate "${m.data.filename}"`);
         continue;
       }
-      seen.add(m.data.filename);
+      seen.add(`${m.data.filename}|${m.t}`);
       // Minimal message object with just what handleMessage and downloadDirect use
       enqueue({
         id: { _serialized: m.id }, from: g.id, to: g.id, author: m.author, fromMe: m.fromMe, hasMedia: true,
@@ -1028,12 +1030,12 @@ async function handleMessage(msg, knownGroupName) {
     const isWord = PRINT_WORD && WORD_EXT.test(name);
     // Files that won't be printed are remembered as handled, so the backup check doesn't fetch them again
     if (!media || (mime !== 'application/pdf' && !name.toLowerCase().endsWith('.pdf') && !okImage && !isWord)) {
-      markPrinted(id, msg.from, (msg._data && msg._data.filename) || name, groupName);
+      markPrinted(id, msg.from, (msg._data && msg._data.filename) || name, groupName, msg.timestamp);
       return log(`Ignored "${name}" from ${who}: not a PDF${PRINT_WORD ? ', Word file' : ''} or photo`);
     }
     const data = Buffer.from(media.data, 'base64');
     if (data.length > MAX_MB * 1024 * 1024) {
-      markPrinted(id, msg.from, (msg._data && msg._data.filename) || name, groupName);
+      markPrinted(id, msg.from, (msg._data && msg._data.filename) || name, groupName, msg.timestamp);
       return log(`Ignored "${name}" from ${who}: larger than ${MAX_MB} MB`);
     }
 
@@ -1048,7 +1050,7 @@ async function handleMessage(msg, knownGroupName) {
         try { fs.unlinkSync(file); } catch (e) { /* ignore */ }
         file = pdf;
       } catch (e) {
-        markPrinted(id, msg.from, (msg._data && msg._data.filename) || name, groupName);
+        markPrinted(id, msg.from, (msg._data && msg._data.filename) || name, groupName, msg.timestamp);
         log(`Could not convert "${name}" to PDF: ${e.message}`);
         if (isGroup) await sendBot(msg.from, `⚠️ Couldn't open the Word file "${name}" for printing.\nPlease save it as PDF (File → Save As → PDF) and send the PDF.`);
         return;
@@ -1057,7 +1059,7 @@ async function handleMessage(msg, knownGroupName) {
     if (ASK_BEFORE_PRINT && isGroup) {
       // Don't print yet: record the PDF as handled (so it is never picked up twice) and ask for options
       step = 'create print request';
-      markPrinted(id, msg.from, (msg._data && msg._data.filename) || name, groupName);
+      markPrinted(id, msg.from, (msg._data && msg._data.filename) || name, groupName, msg.timestamp);
       await inFlow(() => createRequest({
         msgId: id, chatId: msg.from, groupName, file, filename: name, who,        detectKey: `${msg.from}|${(msg._data && msg._data.filename) || name}|${msg.timestamp}`,
         senderUser: msg.fromMe ? 'me' : String(msg.author || '').split('@')[0], fromMe: !!msg.fromMe,
@@ -1066,7 +1068,7 @@ async function handleMessage(msg, knownGroupName) {
     }
     step = 'print';
     await printPdf(file);
-    markPrinted(id, msg.from, (msg._data && msg._data.filename) || name, groupName);
+    markPrinted(id, msg.from, (msg._data && msg._data.filename) || name, groupName, msg.timestamp);
     log(`PRINTED "${name}" from ${who}`);
     if (REPLY_TEXT) {
       step = 'reply';
